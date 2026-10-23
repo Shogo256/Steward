@@ -132,6 +132,7 @@ fn status(p: &Project) -> Result<bool, String> {
     let mut ok = true;
     let mut claimed: BTreeMap<String, String> = BTreeMap::new();
     println!("{}: {} parts", p.ledger.project, p.ledger.components.len());
+    let width = p.ledger.components.iter().map(|c| c.name.len()).max().unwrap_or(0);
     for c in &p.ledger.components {
         let (files, missing) = p.files(c);
         for f in &files {
@@ -152,7 +153,8 @@ fn status(p: &Project) -> Result<bool, String> {
                 format!("CHANGED     since its review of {}", r.date)
             }
         };
-        println!("  {:<12} {state}  ({} files)", c.name, files.len());
+        let count = if files.len() == 1 { "1 file".to_string() } else { format!("{} files", files.len()) };
+        println!("  {:<width$}  {state}  ({count})", c.name);
         for m in missing {
             println!("  MISSING    [{}] {m} matches no file", c.name);
             ok = false;
@@ -198,6 +200,7 @@ fn verify(p: &Project, names: &[String]) -> Result<bool, String> {
     let (_, toolchain) = p.toolchain();
     let today = Date::today();
     let mut all = true;
+    let width = chosen.iter().map(|c| c.name.len()).max().unwrap_or(0);
     for c in chosen {
         let hash = p.hash(c)?;
         let start = Instant::now();
@@ -220,7 +223,7 @@ fn verify(p: &Project, names: &[String]) -> Result<bool, String> {
             &p.dir,
             &Verification { date: today, component: c.name.clone(), hash, passed, seconds, toolchain: toolchain.clone() },
         )?;
-        println!("  {}  {:<12} {:.1} s", if passed { "pass" } else { "FAIL" }, c.name, seconds);
+        println!("  {}  {:<width$}  {:.1} s", if passed { "pass" } else { "FAIL" }, c.name, seconds);
         all &= passed;
     }
     Ok(all)
