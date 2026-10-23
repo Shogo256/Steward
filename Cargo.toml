@@ -1,0 +1,15 @@
+[package]
+name = "steward"
+version = "0.1.0"
+edition = "2021"
+description = "A maintenance ledger for code you write yourself: what you own, what each piece follows, how it is verified, and whether it changed since it was last reviewed"
+license = "Apache-2.0"
+publish = false
+
+# None, on purpose: the tool that watches dependency-free code must not
+# itself be built from code someone else can change. SHA-256, the ledger
+# format, glob matching and dates are written in src/.
+[dependencies]
+
+[profile.release]
+debug = 1
