@@ -11,6 +11,12 @@
 //! toolchain = rustc --version   # (repeatable) what identifies the tools
 //! stale = 90                    # days after which a verification is old
 //!
+//! # Signed reviews, kept apart from the changes they review (optional):
+//! reviewer = alice keys/alice.pub alice@example.org   # (repeatable) name,
+//! #   public key file, and the git emails the reviewer writes code as
+//! sign = basis-token sign "$STEWARD_REVIEWER" "$STEWARD_MESSAGE"
+//! check-signature = basis-token verify "$STEWARD_PUBLIC" "$STEWARD_MESSAGE" "$STEWARD_SIGNATURE"
+//!
 //! [sha3]
 //! files = host/src/hash.rs      # (repeatable) globs
 //! standard = FIPS 202 (August 2015)
@@ -33,6 +39,15 @@ pub struct Component {
     pub line: usize,
 }
 
+/// Someone who may review: a name, a file holding their public key, and the
+/// email addresses git records them by as an author.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reviewer {
+    pub name: String,
+    pub public: String,
+    pub emails: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Ledger {
     pub project: String,
@@ -42,6 +57,18 @@ pub struct Ledger {
     pub toolchain: Vec<String>,
     pub stale_days: i64,
     pub components: Vec<Component>,
+    pub reviewers: Vec<Reviewer>,
+    /// The command that signs a review, and the one that checks a
+    /// signature; both or neither, and with reviewers.
+    pub sign: Option<String>,
+    pub check_signature: Option<String>,
+}
+
+impl Ledger {
+    /// Whether reviews are signed and kept apart from their changes.
+    pub fn signed(&self) -> bool {
+        !self.reviewers.is_empty()
+    }
 }
 
 pub fn parse(text: &str) -> Result<Ledger, String> {
@@ -79,6 +106,26 @@ pub fn parse(text: &str) -> Result<Ledger, String> {
             (None, "lock") => l.locks.push(value.to_string()),
             (None, "toolchain") => l.toolchain.push(value.to_string()),
             (None, "stale") => l.stale_days = value.parse().map_err(|_| format!("line {n}: stale is a number of days"))?,
+            (None, "reviewer") => {
+                let words: Vec<&str> = value.split_whitespace().collect();
+                if words.len() < 3 {
+                    return Err(format!("line {n}: a reviewer is a name, a public key file and their git email(s)"));
+                }
+                if !words[0].chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+                    return Err(format!("line {n}: a reviewer's name is letters, digits, - _ and ."));
+                }
+                if l.reviewers.iter().any(|r| r.name == words[0]) {
+                    return Err(format!("line {n}: reviewer {} twice", words[0]));
+                }
+                l.reviewers.push(Reviewer {
+                    name: words[0].to_string(),
+                    public: words[1].to_string(),
+                    emails: words[2..].iter().map(|e| e.to_ascii_lowercase()).collect(),
+                });
+            }
+            (None, "sign") if l.sign.is_none() => l.sign = Some(value.to_string()),
+            (None, "check-signature") if l.check_signature.is_none() => l.check_signature = Some(value.to_string()),
+            (None, "sign" | "check-signature") => return Err(format!("line {n}: `{key}` twice")),
             (Some(c), "files") => c.files.push(value.to_string()),
             (Some(c), "standard") => c.standards.push(value.to_string()),
             (Some(c), "verify") => c.verify.push(value.to_string()),
@@ -97,6 +144,9 @@ pub fn parse(text: &str) -> Result<Ledger, String> {
     }
     if l.project.is_empty() {
         return Err("the ledger names no project".into());
+    }
+    if l.signed() != l.sign.is_some() || l.signed() != l.check_signature.is_some() {
+        return Err("signed reviews need reviewers, `sign` and `check-signature`, all three".into());
     }
     Ok(l)
 }
@@ -130,6 +180,17 @@ mod tests {
     }
 
     #[test]
+    fn reviewers_read_with_their_emails() {
+        let l = parse(
+            "project = P\nreviewer = alice keys/a.pub Alice@Example.org a2@x\nsign = s\ncheck-signature = c\n",
+        )
+        .unwrap();
+        assert!(l.signed());
+        assert_eq!(l.reviewers[0].emails, vec!["alice@example.org", "a2@x"]);
+        assert!(!parse(GOOD).unwrap().signed());
+    }
+
+    #[test]
     fn faults_are_named_with_their_line() {
         for (bad, says) in [
             ("project = P\n[a]\nfiles = x\n", "no verify"),
@@ -141,6 +202,11 @@ mod tests {
             ("own = x\n", "no project"),
             ("project = P\nwhat\n", "key = value"),
             ("project = P\n[a]\nfiles = x\nverify = true\ncolour = red\n", "not a setting of [a]"),
+            ("project = P\nreviewer = a k.pub\n", "git email"),
+            ("project = P\nreviewer = a k.pub a@x\n", "all three"),
+            ("project = P\nsign = s\ncheck-signature = c\n", "all three"),
+            ("project = P\nreviewer = a k a@x\nreviewer = a k b@x\n", "twice"),
+            ("project = P\nsign = s\nsign = t\n", "twice"),
         ] {
             let e = parse(bad).unwrap_err();
             assert!(e.contains(says), "{bad:?}: {e}");

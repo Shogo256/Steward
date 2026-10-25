@@ -5,7 +5,9 @@
 //!
 //! - `steward.history`: every verification, `date component hash result
 //!   seconds toolchain`;
-//! - `steward.reviews`: every review, `date component hash toolchain note`.
+//! - `steward.reviews`: every review, `date component hash toolchain note`,
+//!   or, where reviews are signed, `date component hash toolchain commit
+//!   reviewer signature note`.
 
 use std::io::Write;
 use std::path::Path;
@@ -29,6 +31,37 @@ pub struct Review {
     pub hash: String,
     pub toolchain: String,
     pub note: String,
+    /// Where reviews are signed: the commit reviewed, who reviewed it and
+    /// their signature over `message`; empty otherwise.
+    pub signed: Option<Signed>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Signed {
+    pub commit: String,
+    pub reviewer: String,
+    pub signature: String,
+}
+
+/// A field as it is written: tabs and line breaks become spaces.
+pub fn field(s: &str) -> String {
+    s.replace(['\t', '\n', '\r'], " ")
+}
+
+/// What a reviewer signs: every field of the review, and the project's name,
+/// one per line, after a line naming the format.
+pub fn message(project: &str, r: &Review, s: &Signed) -> String {
+    format!(
+        "steward review 1\nproject {}\npart {}\nhash {}\ntoolchain {}\ncommit {}\ndate {}\nreviewer {}\nnote {}\n",
+        field(project),
+        r.component,
+        r.hash,
+        r.toolchain,
+        s.commit,
+        r.date,
+        s.reviewer,
+        field(&r.note)
+    )
 }
 
 pub const HISTORY: &str = "steward.history";
@@ -72,17 +105,24 @@ pub fn reviews(dir: &Path) -> Result<Vec<Review>, String> {
     lines(&path)?
         .into_iter()
         .map(|(n, f)| {
-            if f.len() != 5 {
-                return Err(format!("{}:{n}: a review is date, component, hash, toolchain, note", path.display()));
-            }
-            Ok(Review { date: date(&path, n, &f[0])?, component: f[1].clone(), hash: f[2].clone(), toolchain: f[3].clone(), note: f[4].clone() })
+            let (signed, note) = match f.len() {
+                5 => (None, f[4].clone()),
+                8 => (Some(Signed { commit: f[4].clone(), reviewer: f[5].clone(), signature: f[6].clone() }), f[7].clone()),
+                _ => {
+                    return Err(format!(
+                        "{}:{n}: a review is date, component, hash, toolchain, [commit, reviewer, signature,] note",
+                        path.display()
+                    ))
+                }
+            };
+            Ok(Review { date: date(&path, n, &f[0])?, component: f[1].clone(), hash: f[2].clone(), toolchain: f[3].clone(), note, signed })
         })
         .collect()
 }
 
 fn append(dir: &Path, file: &str, fields: &[String]) -> Result<(), String> {
     let path = dir.join(file);
-    let line = fields.iter().map(|f| f.replace(['\t', '\n', '\r'], " ")).collect::<Vec<_>>().join("\t");
+    let line = fields.iter().map(|f| field(f)).collect::<Vec<_>>().join("\t");
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     writeln!(f, "{line}").map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -96,5 +136,10 @@ pub fn record_verification(dir: &Path, v: &Verification) -> Result<(), String> {
 }
 
 pub fn record_review(dir: &Path, r: &Review) -> Result<(), String> {
-    append(dir, REVIEWS, &[r.date.to_string(), r.component.clone(), r.hash.clone(), r.toolchain.clone(), r.note.clone()])
+    let mut fields = vec![r.date.to_string(), r.component.clone(), r.hash.clone(), r.toolchain.clone()];
+    if let Some(s) = &r.signed {
+        fields.extend([s.commit.clone(), s.reviewer.clone(), s.signature.clone()]);
+    }
+    fields.push(r.note.clone());
+    append(dir, REVIEWS, &fields)
 }

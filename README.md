@@ -26,6 +26,10 @@ ledger format, glob matching and calendar are written in `src/`.
 - **Is a review backed by a passing check?** `review` refuses a part unless
   its last verification passed, on exactly its current files and with the
   current toolchain.
+- **Was it reviewed by someone who did not write it?** Where the ledger
+  names reviewers, a review is signed with the reviewer's key and refused
+  to anyone who wrote, or co-wrote, a commit it covers; `status` checks
+  every signature, and the separation again from git, each time.
 - **What needs attention?** `report` lists, per part, its standard, its last
   review and verification, verifications older than `stale` days, parts
   whose toolchain changed since they were verified, and standards due to be
@@ -58,6 +62,41 @@ Settings before the first `[part]` are the project's; `own`, `exempt`,
 whole lines starting with `#`. `verify` commands run with `sh -c` in the
 project's root. Every part needs files and at least one check.
 
+## Signed reviews
+
+A project without an independent audit can at least keep its reviews apart
+from its changes. Name the reviewers, their public keys, and the email
+addresses git records them by as authors, and the commands that sign and
+check:
+
+```text
+reviewer = alice keys/alice.pub alice@example.org
+reviewer = bob keys/bob.pub bob@example.org
+sign = basis-token sign "$STEWARD_REVIEWER" "$STEWARD_MESSAGE"
+check-signature = basis-token verify "$STEWARD_PUBLIC" "$STEWARD_MESSAGE" "$STEWARD_SIGNATURE"
+```
+
+Then a review is made on a commit, as one of them:
+
+```bash
+steward review sha3 --as bob --note "read against FIPS 202 and its errata"
+```
+
+It is refused while the part has changes not committed, and refused to a
+reviewer who is the author or a co-author (`Co-authored-by:`) of a commit
+that changed the part since its last signed review. The review's fields,
+the project and the commit are signed by `sign`, run with the terminal's
+input so that it can ask for a PIN; with Basis's `basis-token`, that is an
+ML-DSA-65 signature by a key kept on its token. `status` then fails a
+part whose last review is unsigned (`UNSIGNED`), by no listed reviewer or
+not carrying its reviewer's signature (`FORGED`), or by someone who wrote
+a change it covers (`SELF-REVIEW`), so that a record added or edited by
+hand is not taken on trust.
+
+The separation is as strong as the email addresses in the history: git
+records what its committers say. The signatures bind each review to its
+reviewer's key, the part's content and the commit.
+
 ## The records
 
 Beside the ledger, appended and never rewritten, tab-separated:
@@ -65,7 +104,8 @@ Beside the ledger, appended and never rewritten, tab-separated:
 - `steward.history`: every verification (date, part, content hash, pass or
   fail, seconds, toolchain fingerprint);
 - `steward.reviews`: every review (date, part, content hash, toolchain
-  fingerprint, note).
+  fingerprint, and where reviews are signed the commit, the reviewer and
+  the signature, then the note).
 
 Commit them with the code: the project's upkeep is then part of its history.
 
@@ -78,7 +118,7 @@ cargo build --release
 ```bash
 steward status                      # the default; exit 1 on any fault
 steward verify [PART...]            # run the checks and record them
-steward review PART --note "what was looked at"
+steward review PART [--as REVIEWER] --note "what was looked at"
 steward report [--strict]           # --strict: exit 1 if anything is due
 steward deps                        # the lock files alone
 steward toolchain                   # what the toolchain commands print
@@ -98,7 +138,8 @@ cargo test --release
 
 FIPS 180-4's SHA-256 examples, the calendar over 1.6 million days, the
 ledger's format and its faults, glob patterns, and the whole flow through
-the binary on a scratch project.
+the binary on a scratch project, signed reviews included (in a scratch git
+repository, with a stand-in signature).
 
 ## License
 

@@ -12,11 +12,14 @@
 //!
 //!     steward [--dir DIR] status            the default; exit 1 on a fault
 //!     steward [--dir DIR] verify [PART...]  run the parts' checks, record them
-//!     steward [--dir DIR] review PART --note TEXT
+//!     steward [--dir DIR] review PART [--as REVIEWER] --note TEXT
 //!     steward [--dir DIR] report [--strict]
 //!     steward [--dir DIR] deps
 //!     steward [--dir DIR] toolchain
 //!     steward [--dir DIR] hash PART
+//!
+//! Where the ledger names reviewers, a review is signed and is refused to
+//! anyone who wrote a change it would cover (see signing.rs).
 
 mod date;
 mod glob;
@@ -24,6 +27,7 @@ mod ledger;
 mod lockfile;
 mod records;
 mod sha256;
+mod signing;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -32,7 +36,7 @@ use std::time::Instant;
 
 use date::Date;
 use ledger::{Component, Ledger};
-use records::{Review, Verification};
+use records::{Review, Signed, Verification};
 
 const LEDGER: &str = "steward.ledger";
 
@@ -147,7 +151,13 @@ fn status(p: &Project) -> Result<bool, String> {
                 ok = false;
                 "UNREVIEWED  never reviewed".to_string()
             }
-            Some(r) if r.hash == hash => format!("ok          reviewed {}", r.date),
+            Some(r) if r.hash == hash => match signed_fault(p, c, &reviews, r, &files) {
+                None => format!("ok          reviewed {}{}", r.date, by(r)),
+                Some(fault) => {
+                    ok = false;
+                    fault
+                }
+            },
             Some(r) => {
                 ok = false;
                 format!("CHANGED     since its review of {}", r.date)
@@ -173,6 +183,41 @@ fn status(p: &Project) -> Result<bool, String> {
     ok &= deps(p)?;
     println!("{}", if ok { "every part is as reviewed" } else { "faults above" });
     Ok(ok)
+}
+
+/// " by NAME" for a signed review.
+fn by(r: &Review) -> String {
+    r.signed.as_ref().map(|s| format!(" by {}", s.reviewer)).unwrap_or_default()
+}
+
+/// Where reviews are signed, what is wrong with the part's last review `r`:
+/// unsigned, by no listed reviewer, a signature that does not check, or a
+/// reviewer who wrote a change it covers. None where reviews are not signed.
+fn signed_fault(p: &Project, c: &Component, reviews: &[Review], r: &Review, files: &[String]) -> Option<String> {
+    if !p.ledger.signed() {
+        return None;
+    }
+    let Some(s) = &r.signed else { return Some(format!("UNSIGNED    the review of {} is not signed", r.date)) };
+    let Some(reviewer) = p.ledger.reviewers.iter().find(|x| x.name == s.reviewer) else {
+        return Some(format!("FORGED      {} is no reviewer of this ledger", s.reviewer));
+    };
+    match signing::check(&p.dir, &p.ledger, reviewer, &records::message(&p.ledger.project, r, s), &s.signature) {
+        Ok(true) => {}
+        Ok(false) => return Some(format!("FORGED      the review of {} does not carry {}'s signature", r.date, s.reviewer)),
+        Err(e) => return Some(format!("UNCHECKED   {e}")),
+    }
+    let earlier = reviews.iter().take_while(|x| !std::ptr::eq(*x, r)).filter(|x| x.component == c.name && x.signed.is_some());
+    let since = earlier.last().and_then(|x| x.signed.as_ref()).map(|x| x.commit.as_str());
+    match signing::authors(&p.dir, since, &s.commit, files) {
+        Ok(authors) => {
+            let own: Vec<&String> = reviewer.emails.iter().filter(|e| authors.contains(*e)).collect();
+            if let Some(e) = own.first() {
+                return Some(format!("SELF-REVIEW {} reviewed changes written as {e}", s.reviewer));
+            }
+        }
+        Err(e) => return Some(format!("UNCHECKED   {e}")),
+    }
+    None
 }
 
 fn deps(p: &Project) -> Result<bool, String> {
@@ -231,9 +276,12 @@ fn verify(p: &Project, names: &[String]) -> Result<bool, String> {
 
 // ------------------------------------------------------------------ review
 
-fn review(p: &Project, name: &str, note: &str) -> Result<(), String> {
+fn review(p: &Project, name: &str, note: &str, reviewer: Option<&str>) -> Result<(), String> {
     if note.trim().is_empty() {
         return Err("a review says what was looked at: --note TEXT".into());
+    }
+    if !p.ledger.signed() && reviewer.is_some() {
+        return Err("this ledger names no reviewers: review without --as".into());
     }
     let c = p.component(name)?;
     let hash = p.hash(c)?;
@@ -250,9 +298,44 @@ fn review(p: &Project, name: &str, note: &str) -> Result<(), String> {
         }
         Some(_) => {}
     }
-    records::record_review(&p.dir, &Review { date: Date::today(), component: c.name.clone(), hash, toolchain, note: note.to_string() })?;
-    println!("[{name}] reviewed");
+    let mut r = Review { date: Date::today(), component: c.name.clone(), hash, toolchain, note: note.to_string(), signed: None };
+    if p.ledger.signed() {
+        r.signed = Some(signed_review(p, c, &r, reviewer.ok_or("reviews here are signed: review PART --as REVIEWER --note TEXT")?)?);
+    }
+    records::record_review(&p.dir, &r)?;
+    println!("[{name}] reviewed{}", by(&r));
     Ok(())
+}
+
+/// The signature of `reviewer` on the review `r` of `c`, once the part is
+/// committed as it stands and none of its changes since its last signed
+/// review are theirs.
+fn signed_review(p: &Project, c: &Component, r: &Review, reviewer: &str) -> Result<Signed, String> {
+    let who = p.ledger.reviewers.iter().find(|x| x.name == reviewer).ok_or_else(|| {
+        format!("{reviewer} is not a reviewer of this ledger; it has {}", p.ledger.reviewers.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", "))
+    })?;
+    let (files, _) = p.files(c);
+    let dirty = signing::uncommitted(&p.dir, &files)?;
+    if !dirty.is_empty() {
+        return Err(format!("[{}] has changes not committed ({}): a review is of a commit", c.name, dirty.join(", ")));
+    }
+    let commit = signing::head(&p.dir)?;
+    let reviews = records::reviews(&p.dir)?;
+    let since = last(&reviews, |x| x.component == c.name && x.signed.is_some()).and_then(|x| x.signed.as_ref()).map(|x| x.commit.clone());
+    let authors = signing::authors(&p.dir, since.as_deref(), &commit, &files)?;
+    if let Some(e) = who.emails.iter().find(|e| authors.contains(*e)) {
+        return Err(format!(
+            "{reviewer} wrote changes to [{}] since its last signed review (as {e}): another reviewer reviews them",
+            c.name
+        ));
+    }
+    let mut s = Signed { commit, reviewer: reviewer.to_string(), signature: String::new() };
+    let message = records::message(&p.ledger.project, r, &s);
+    s.signature = signing::sign(&p.dir, &p.ledger, who, &message)?;
+    if !signing::check(&p.dir, &p.ledger, who, &message, &s.signature)? {
+        return Err(format!("the signature does not check against {}'s public key ({})", who.name, who.public));
+    }
+    Ok(s)
 }
 
 // ------------------------------------------------------------------ report
@@ -272,7 +355,7 @@ fn report(p: &Project, strict: bool) -> Result<bool, String> {
             println!("  standard   {s}");
         }
         match last(&reviews, |r| r.component == c.name) {
-            Some(r) if r.hash == hash => println!("  review     {} ({})", r.date, r.note),
+            Some(r) if r.hash == hash => println!("  review     {}{} ({})", r.date, by(r), r.note),
             Some(r) => {
                 due += 1;
                 println!("  review     CHANGED since {} ({})", r.date, r.note)
@@ -322,7 +405,7 @@ fn report(p: &Project, strict: bool) -> Result<bool, String> {
 // -------------------------------------------------------------------- main
 
 fn usage() -> ! {
-    eprintln!("steward [--dir DIR] [status | verify [PART...] | review PART --note TEXT | report [--strict] | deps | toolchain | hash PART]");
+    eprintln!("steward [--dir DIR] [status | verify [PART...] | review PART [--as REVIEWER] --note TEXT | report [--strict] | deps | toolchain | hash PART]");
     exit(2)
 }
 
@@ -343,11 +426,16 @@ fn run(args: &[String]) -> Result<bool, String> {
         Some("verify") => verify(&p, &rest[1..]),
         Some("review") => {
             let name = rest.get(1).ok_or("review needs a part's name")?;
-            let note = match (rest.get(2).map(String::as_str), rest.get(3)) {
-                (Some("--note"), Some(n)) => n.clone(),
-                _ => return Err("review PART --note TEXT".into()),
-            };
-            review(&p, name, &note).map(|_| true)
+            let (mut note, mut reviewer) = (None, None);
+            let mut it = rest[2..].iter();
+            while let Some(a) = it.next() {
+                match (a.as_str(), it.next()) {
+                    ("--note", Some(n)) if note.is_none() => note = Some(n.clone()),
+                    ("--as", Some(r)) if reviewer.is_none() => reviewer = Some(r.clone()),
+                    _ => return Err("review PART [--as REVIEWER] --note TEXT".into()),
+                }
+            }
+            review(&p, name, &note.ok_or("review PART [--as REVIEWER] --note TEXT")?, reviewer.as_deref()).map(|_| true)
         }
         Some("report") => report(&p, rest.get(1).map(String::as_str) == Some("--strict")),
         Some("deps") => deps(&p),
