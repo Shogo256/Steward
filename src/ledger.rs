@@ -14,6 +14,10 @@
 //! # Signed reviews, kept apart from the changes they review (optional):
 //! reviewer = alice keys/alice.pub alice@example.org   # (repeatable) name,
 //! #   public key file, and the git emails the reviewer writes code as
+//! self-reviewer = carol keys/carol.pub carol@example.org
+//! #   (repeatable) a reviewer whose reviews of changes they wrote stand:
+//! #   signed, but not kept apart from the changes, for a project with one
+//! #   author and no second reviewer; `reviewer` again restores the rule
 //! sign = basis-token sign "$STEWARD_REVIEWER" "$STEWARD_MESSAGE"
 //! check-signature = basis-token verify "$STEWARD_PUBLIC" "$STEWARD_MESSAGE" "$STEWARD_SIGNATURE"
 //!
@@ -46,6 +50,9 @@ pub struct Reviewer {
     pub name: String,
     pub public: String,
     pub emails: Vec<String>,
+    /// Named by a `self-reviewer` line: their reviews of changes they wrote
+    /// stand.
+    pub own_changes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -106,7 +113,7 @@ pub fn parse(text: &str) -> Result<Ledger, String> {
             (None, "lock") => l.locks.push(value.to_string()),
             (None, "toolchain") => l.toolchain.push(value.to_string()),
             (None, "stale") => l.stale_days = value.parse().map_err(|_| format!("line {n}: stale is a number of days"))?,
-            (None, "reviewer") => {
+            (None, key @ ("reviewer" | "self-reviewer")) => {
                 let words: Vec<&str> = value.split_whitespace().collect();
                 if words.len() < 3 {
                     return Err(format!("line {n}: a reviewer is a name, a public key file and their git email(s)"));
@@ -121,6 +128,7 @@ pub fn parse(text: &str) -> Result<Ledger, String> {
                     name: words[0].to_string(),
                     public: words[1].to_string(),
                     emails: words[2..].iter().map(|e| e.to_ascii_lowercase()).collect(),
+                    own_changes: key == "self-reviewer",
                 });
             }
             (None, "sign") if l.sign.is_none() => l.sign = Some(value.to_string()),
@@ -187,7 +195,10 @@ mod tests {
         .unwrap();
         assert!(l.signed());
         assert_eq!(l.reviewers[0].emails, vec!["alice@example.org", "a2@x"]);
+        assert!(!l.reviewers[0].own_changes);
         assert!(!parse(GOOD).unwrap().signed());
+        let l = parse("project = P\nself-reviewer = carol keys/c.pub c@x\nsign = s\ncheck-signature = c\n").unwrap();
+        assert!(l.signed() && l.reviewers[0].own_changes);
     }
 
     #[test]
@@ -206,6 +217,8 @@ mod tests {
             ("project = P\nreviewer = a k.pub a@x\n", "all three"),
             ("project = P\nsign = s\ncheck-signature = c\n", "all three"),
             ("project = P\nreviewer = a k a@x\nreviewer = a k b@x\n", "twice"),
+            ("project = P\nreviewer = a k a@x\nself-reviewer = a k b@x\n", "twice"),
+            ("project = P\nself-reviewer = a k.pub\n", "git email"),
             ("project = P\nsign = s\nsign = t\n", "twice"),
         ] {
             let e = parse(bad).unwrap_err();

@@ -233,6 +233,39 @@ fn a_signed_review_is_by_someone_else_and_checked_every_time() {
 }
 
 #[test]
+fn a_self_reviewers_review_of_their_own_changes_stands_and_says_so() {
+    let d = signed_project("self");
+    let ledger = std::fs::read_to_string(d.join("steward.ledger")).unwrap();
+    let as_self = ledger.replace("reviewer = alice keys/alice.pub", "self-reviewer = alice keys/alice.pub");
+    std::fs::write(d.join("steward.ledger"), &as_self).unwrap();
+    assert_eq!(steward(&d, &["verify"]).0, 0);
+    let (code, out) = steward(&d, &["review", "hash", "--as", "alice", "--note", "my own, read again"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("reviewed by alice, changes of their own among it (self-reviewer)"), "{out}");
+    let (code, out) = steward(&d, &["status"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("by alice (self-review)"), "{out}");
+    assert!(out.contains("alice's reviews of changes they wrote stand"), "{out}");
+
+    // `reviewer` again: the rule is back. The review it let stand is a
+    // fault, and alice may not review her change again on the strength of
+    // her own review; bob, who wrote none of it, may.
+    std::fs::write(d.join("steward.ledger"), &ledger).unwrap();
+    let (code, out) = steward(&d, &["status"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("SELF-REVIEW alice"), "{out}");
+    let (code, out) = steward(&d, &["review", "hash", "--as", "alice", "--note", "x"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("alice wrote changes"), "{out}");
+    let (code, out) = steward(&d, &["review", "hash", "--as", "bob", "--note", "alice's code read"]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = steward(&d, &["status"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("self-review"), "{out}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn an_unsigned_review_does_not_stand_where_reviews_are_signed() {
     let d = signed_project("unsigned");
     assert_eq!(steward(&d, &["verify"]).0, 0);

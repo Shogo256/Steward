@@ -4,10 +4,16 @@
 //! Where the ledger names reviewers, a review is made on a commit: the
 //! part's files must be committed as they are, and the reviewer must not be
 //! the author (or a co-author) of any commit that changed them since the
-//! part's last signed review. The review is signed by the ledger's `sign`
-//! command with the reviewer's key, and every `status` checks each part's
-//! signature with `check-signature` and the separation again from git, so
-//! a record added or edited by hand is caught rather than trusted.
+//! part's last signed review that was kept apart in the same way. The
+//! review is signed by the ledger's `sign` command with the reviewer's key,
+//! and every `status` checks each part's signature with `check-signature`
+//! and the separation again from git, so that a record added or edited by
+//! hand is caught rather than trusted.
+//!
+//! A reviewer the ledger names with `self-reviewer` may review changes they
+//! wrote: the review is signed and stands, `status` says it is a
+//! self-review, and the changes it covered stay to be covered by the next
+//! review kept apart, should the ledger name them `reviewer` again.
 //!
 //! Steward signs nothing itself: the commands do, given the message in a
 //! file. With Basis's token the key stays on the token, under its PIN:

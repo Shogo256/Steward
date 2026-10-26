@@ -97,6 +97,21 @@ The separation is as strong as the email addresses in the history: git
 records what its committers say. The signatures bind each review to its
 reviewer's key, the part's content and the commit.
 
+A project with one author and no second reviewer can still sign its
+reviews, without the separation: name that reviewer with `self-reviewer`
+instead of `reviewer`.
+
+```text
+self-reviewer = carol keys/carol.pub carol@example.org
+```
+
+Their reviews of changes they wrote then stand, and say so: `review` and
+`status` call each one a self-review, and `status` names every
+self-reviewer, so that the ledger and its output do not claim more than
+was done. Naming them `reviewer` again restores the rule: their
+self-reviews become `SELF-REVIEW` faults, and the changes those covered
+are left for the next review by someone else.
+
 ## The records
 
 Beside the ledger, appended and never rewritten, tab-separated:

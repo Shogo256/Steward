@@ -19,7 +19,8 @@
 //!     steward [--dir DIR] hash PART
 //!
 //! Where the ledger names reviewers, a review is signed and is refused to
-//! anyone who wrote a change it would cover (see signing.rs).
+//! anyone who wrote a change it would cover (see signing.rs), unless the
+//! ledger names them a self-reviewer: then it stands, and says so.
 
 mod date;
 mod glob;
@@ -151,9 +152,9 @@ fn status(p: &Project) -> Result<bool, String> {
                 ok = false;
                 "UNREVIEWED  never reviewed".to_string()
             }
-            Some(r) if r.hash == hash => match signed_fault(p, c, &reviews, r, &files) {
-                None => format!("ok          reviewed {}{}", r.date, by(r)),
-                Some(fault) => {
+            Some(r) if r.hash == hash => match signed_state(p, c, &reviews, r, &files) {
+                Ok(own) => format!("ok          reviewed {}{}{}", r.date, by(r), if own { " (self-review)" } else { "" }),
+                Err(fault) => {
                     ok = false;
                     fault
                 }
@@ -180,6 +181,9 @@ fn status(p: &Project) -> Result<bool, String> {
         println!("  UNCLAIMED  {f}: owned, but in no part (add it to one, or to `exempt`)");
     }
     ok &= unclaimed.is_empty();
+    for r in p.ledger.reviewers.iter().filter(|r| r.own_changes) {
+        println!("  self       {}'s reviews of changes they wrote stand (self-reviewer): not kept apart", r.name);
+    }
     ok &= deps(p)?;
     println!("{}", if ok { "every part is as reviewed" } else { "faults above" });
     Ok(ok)
@@ -190,34 +194,52 @@ fn by(r: &Review) -> String {
     r.signed.as_ref().map(|s| format!(" by {}", s.reviewer)).unwrap_or_default()
 }
 
+/// The commit of the part's last signed review, before `upto` if given,
+/// that was kept apart from the changes it covered: signed as it should
+/// be, by a reviewer who wrote none of the changes since the last such
+/// review before it. The next review covers every change since; a
+/// self-reviewer's review of changes of their own is not such a review,
+/// so the changes it let stand are still the next reviewer's to cover.
+fn apart(p: &Project, c: &Component, reviews: &[Review], upto: Option<&Review>, files: &[String]) -> Result<Option<String>, String> {
+    let mut since: Option<String> = None;
+    for r in reviews.iter().take_while(|x| upto.is_none_or(|u| !std::ptr::eq(*x, u))).filter(|x| x.component == c.name) {
+        let Some(s) = &r.signed else { continue };
+        let Some(who) = p.ledger.reviewers.iter().find(|x| x.name == s.reviewer) else { continue };
+        if !signing::check(&p.dir, &p.ledger, who, &records::message(&p.ledger.project, r, s), &s.signature)? {
+            continue;
+        }
+        let authors = signing::authors(&p.dir, since.as_deref(), &s.commit, files)?;
+        if !who.emails.iter().any(|e| authors.contains(e)) {
+            since = Some(s.commit.clone());
+        }
+    }
+    Ok(since)
+}
+
 /// Where reviews are signed, what is wrong with the part's last review `r`:
 /// unsigned, by no listed reviewer, a signature that does not check, or a
-/// reviewer who wrote a change it covers. None where reviews are not signed.
-fn signed_fault(p: &Project, c: &Component, reviews: &[Review], r: &Review, files: &[String]) -> Option<String> {
+/// reviewer who wrote a change it covers and is no self-reviewer. Else
+/// whether it is a self-reviewer's review of changes of their own; false
+/// where reviews are not signed.
+fn signed_state(p: &Project, c: &Component, reviews: &[Review], r: &Review, files: &[String]) -> Result<bool, String> {
     if !p.ledger.signed() {
-        return None;
+        return Ok(false);
     }
-    let Some(s) = &r.signed else { return Some(format!("UNSIGNED    the review of {} is not signed", r.date)) };
+    let Some(s) = &r.signed else { return Err(format!("UNSIGNED    the review of {} is not signed", r.date)) };
     let Some(reviewer) = p.ledger.reviewers.iter().find(|x| x.name == s.reviewer) else {
-        return Some(format!("FORGED      {} is no reviewer of this ledger", s.reviewer));
+        return Err(format!("FORGED      {} is no reviewer of this ledger", s.reviewer));
     };
     match signing::check(&p.dir, &p.ledger, reviewer, &records::message(&p.ledger.project, r, s), &s.signature) {
         Ok(true) => {}
-        Ok(false) => return Some(format!("FORGED      the review of {} does not carry {}'s signature", r.date, s.reviewer)),
-        Err(e) => return Some(format!("UNCHECKED   {e}")),
+        Ok(false) => return Err(format!("FORGED      the review of {} does not carry {}'s signature", r.date, s.reviewer)),
+        Err(e) => return Err(format!("UNCHECKED   {e}")),
     }
-    let earlier = reviews.iter().take_while(|x| !std::ptr::eq(*x, r)).filter(|x| x.component == c.name && x.signed.is_some());
-    let since = earlier.last().and_then(|x| x.signed.as_ref()).map(|x| x.commit.as_str());
-    match signing::authors(&p.dir, since, &s.commit, files) {
-        Ok(authors) => {
-            let own: Vec<&String> = reviewer.emails.iter().filter(|e| authors.contains(*e)).collect();
-            if let Some(e) = own.first() {
-                return Some(format!("SELF-REVIEW {} reviewed changes written as {e}", s.reviewer));
-            }
-        }
-        Err(e) => return Some(format!("UNCHECKED   {e}")),
+    let since = apart(p, c, reviews, Some(r), files).map_err(|e| format!("UNCHECKED   {e}"))?;
+    let authors = signing::authors(&p.dir, since.as_deref(), &s.commit, files).map_err(|e| format!("UNCHECKED   {e}"))?;
+    match reviewer.emails.iter().find(|e| authors.contains(*e)) {
+        Some(e) if !reviewer.own_changes => Err(format!("SELF-REVIEW {} reviewed changes written as {e}", s.reviewer)),
+        own => Ok(own.is_some()),
     }
-    None
 }
 
 fn deps(p: &Project) -> Result<bool, String> {
@@ -299,18 +321,21 @@ fn review(p: &Project, name: &str, note: &str, reviewer: Option<&str>) -> Result
         Some(_) => {}
     }
     let mut r = Review { date: Date::today(), component: c.name.clone(), hash, toolchain, note: note.to_string(), signed: None };
+    let mut own = false;
     if p.ledger.signed() {
-        r.signed = Some(signed_review(p, c, &r, reviewer.ok_or("reviews here are signed: review PART --as REVIEWER --note TEXT")?)?);
+        let (s, o) = signed_review(p, c, &r, reviewer.ok_or("reviews here are signed: review PART --as REVIEWER --note TEXT")?)?;
+        (r.signed, own) = (Some(s), o);
     }
     records::record_review(&p.dir, &r)?;
-    println!("[{name}] reviewed{}", by(&r));
+    println!("[{name}] reviewed{}{}", by(&r), if own { ", changes of their own among it (self-reviewer)" } else { "" });
     Ok(())
 }
 
 /// The signature of `reviewer` on the review `r` of `c`, once the part is
-/// committed as it stands and none of its changes since its last signed
-/// review are theirs.
-fn signed_review(p: &Project, c: &Component, r: &Review, reviewer: &str) -> Result<Signed, String> {
+/// committed as it stands and none of its changes since its last review
+/// kept apart from its changes are theirs, unless they are a
+/// self-reviewer; and whether some are.
+fn signed_review(p: &Project, c: &Component, r: &Review, reviewer: &str) -> Result<(Signed, bool), String> {
     let who = p.ledger.reviewers.iter().find(|x| x.name == reviewer).ok_or_else(|| {
         format!("{reviewer} is not a reviewer of this ledger; it has {}", p.ledger.reviewers.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", "))
     })?;
@@ -321,9 +346,10 @@ fn signed_review(p: &Project, c: &Component, r: &Review, reviewer: &str) -> Resu
     }
     let commit = signing::head(&p.dir)?;
     let reviews = records::reviews(&p.dir)?;
-    let since = last(&reviews, |x| x.component == c.name && x.signed.is_some()).and_then(|x| x.signed.as_ref()).map(|x| x.commit.clone());
+    let since = apart(p, c, &reviews, None, &files)?;
     let authors = signing::authors(&p.dir, since.as_deref(), &commit, &files)?;
-    if let Some(e) = who.emails.iter().find(|e| authors.contains(*e)) {
+    let own = who.emails.iter().find(|e| authors.contains(*e));
+    if let (Some(e), false) = (own, who.own_changes) {
         return Err(format!(
             "{reviewer} wrote changes to [{}] since its last signed review (as {e}): another reviewer reviews them",
             c.name
@@ -335,7 +361,7 @@ fn signed_review(p: &Project, c: &Component, r: &Review, reviewer: &str) -> Resu
     if !signing::check(&p.dir, &p.ledger, who, &message, &s.signature)? {
         return Err(format!("the signature does not check against {}'s public key ({})", who.name, who.public));
     }
-    Ok(s)
+    Ok((s, own.is_some()))
 }
 
 // ------------------------------------------------------------------ report
