@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Clippy
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+
+      # Steward depends on nothing: its lock file holds itself alone.
+      - name: No dependencies
+        run: test "$(grep -c '^name = ' Cargo.lock)" -eq 1
+
+      - name: Help and version
+        run: |
+          cargo run --release --locked -- --version
+          cargo run --release --locked -- --help

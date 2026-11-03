@@ -2,6 +2,7 @@
 name = "steward"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/Shogo256/Steward"
 description = "A maintenance ledger for code you write yourself: what you own, what each piece follows, how it is verified, and whether it changed since it was last reviewed"
 license = "Apache-2.0"
 publish = false
