@@ -6,38 +6,111 @@ A project that depends on nothing from outside has no upstream to find its
 faults and fix them: every part it wrote, it keeps. Steward makes that
 upkeep explicit. A ledger in the project says which files the project owns,
 which part each belongs to, which standard each part follows, how each is
-verified and when its standard should be read again; Steward checks the
+verified and when its standard should be read again. Steward checks the
 project against it, runs the checks, and records who reviewed what, with
-which tools, in plain files under version control.
+which tools, in plain files committed with the code.
 
-Steward itself depends on nothing but Rust's standard library: its SHA-256,
-ledger format, glob matching and calendar are written in `src/`.
+Steward is a command-line tool. It works on a project in any language: the
+checks it runs are the project's own commands (`cargo test`, `pytest`,
+`npm test`, ...). It depends on nothing but Rust's standard library.
 
-## What it answers
+## Installing
 
-- **Has anything changed that nobody reviewed?** Each part's files are
-  hashed; a part whose hash differs from its last review is `CHANGED`, and
-  `status` fails.
-- **Is everything we wrote accounted for?** Files matched by `own` must
-  belong to a part or be `exempt`; any other is `UNCLAIMED`.
-- **Has anything from outside crept in?** The ledger's Cargo.lock files may
-  hold path packages only; a package from a registry or a repository is
-  `OUTSIDE`.
-- **Is a review backed by a passing check?** `review` refuses a part unless
-  its last verification passed, on exactly its current files and with the
-  current toolchain.
-- **Was it reviewed by someone who did not write it?** Where the ledger
-  names reviewers, a review is signed with the reviewer's key and refused
-  to anyone who wrote, or co-wrote, a commit it covers; `status` checks
-  every signature, and the separation again from git, each time.
-- **What needs attention?** `report` lists, per part, its standard, its last
-  review and verification, verifications older than `stale` days, parts
-  whose toolchain changed since they were verified, and standards due to be
-  re-read (`recheck`).
+Requirements: Rust (to build), `sh` (to run the checks; on Windows, Git
+Bash or similar), and git for signed reviews.
+
+```bash
+git clone <this repository's URL> steward
+```
+
+```bash
+cargo install --path steward
+```
+
+This puts `steward` on the `PATH` (in `~/.cargo/bin`).
+
+## Getting started
+
+1. Write `steward.ledger` at the root of your project. The smallest one
+   names the project, the files it owns, and one part with its check:
+
+   ```text
+   project = myproject
+   own = src/**/*.rs
+
+   [parser]
+   files = src/parser.rs
+   standard = RFC 8259
+   verify = cargo test parser
+   ```
+
+2. Run the checks and record them:
+
+   ```bash
+   steward verify
+   ```
+
+3. Look at each part and record that you did:
+
+   ```bash
+   steward review parser --note "read against RFC 8259"
+   ```
+
+4. Commit the ledger and the records (`steward.history`,
+   `steward.reviews`) with your code.
+
+5. From then on, `steward status` passes while every part is as it was
+   reviewed. Run it in CI.
+
+## Day to day
+
+| When | Run |
+|---|---|
+| Any time: is everything as reviewed? | `steward status` |
+| After changing a part | `steward verify PART`, then `steward review PART --note "..."`, then commit the records |
+| Now and then: what needs attention? | `steward report` |
+| In CI | `steward status`, and `steward report --strict` to fail on anything due |
+
+A review is accepted only right after a passing verification of exactly
+the part's current files, with the current toolchain: change a file or a
+tool, and the part must be verified again before it can be reviewed.
+
+## Commands
+
+```text
+steward status                      the default; exit 1 on any fault
+steward verify [PART...]            run the parts' checks (all by default) and record them
+steward review PART [--as REVIEWER] --note TEXT
+steward report [--strict]           per part: standard, review, verification, recheck date
+steward deps                        the lock files alone
+steward toolchain                   what the toolchain commands print, and its fingerprint
+steward hash PART                   a part's content hash
+```
+
+`--dir DIR` works on a project other than the current directory. Exit
+status: 0 when all is well, 1 on a fault, 2 on an error (a bad ledger, an
+unknown part, a refused review).
+
+## What status reports
+
+| Label | Meaning | What to do |
+|---|---|---|
+| `ok` | The part is as it was last reviewed | Nothing |
+| `UNREVIEWED` | The part has never been reviewed | `verify`, then `review` |
+| `CHANGED` | Its files changed since its last review | `verify`, then `review` |
+| `MISSING` | A `files` pattern matches no file | Fix the pattern, or restore the file |
+| `TWICE` | A file belongs to two parts | Keep it in one |
+| `UNCLAIMED` | A file matched by `own` belongs to no part | Add it to a part, or to `exempt` |
+| `OUTSIDE` | A lock file holds a package from a registry or a repository | Remove the dependency |
+| `UNSIGNED` | Where reviews are signed: the last review is not | Review it again, as a reviewer |
+| `FORGED` | Its signature does not check, or its reviewer is not in the ledger | Review it again, as a reviewer |
+| `SELF-REVIEW` | Its reviewer wrote a change it covers | Have another reviewer review it |
+| `UNCHECKED` | The signature or the history could not be checked | Fix the command or the repository named |
 
 ## The ledger
 
-`steward.ledger`, at the project's root:
+`steward.ledger`, at the project's root. Settings before the first
+`[part]` are the project's; those after belong to that part.
 
 ```text
 project = Basis
@@ -57,17 +130,32 @@ verify = python3 -m unittest tests.test_hash
 recheck = 2027-04-01
 ```
 
-Settings before the first `[part]` are the project's; `own`, `exempt`,
-`lock`, `toolchain`, `files`, `standard` and `verify` repeat. Comments are
-whole lines starting with `#`. `verify` commands run with `sh -c` in the
-project's root. Every part needs files and at least one check.
+| Setting | Where | Repeats | Meaning |
+|---|---|---|---|
+| `project` | project | no | The project's name |
+| `own` | project | yes | Glob of the files the project writes itself |
+| `exempt` | project | yes | Glob of owned files that belong to no part |
+| `lock` | project | yes | A Cargo.lock that may hold path packages only |
+| `toolchain` | project | yes | A command whose output identifies the tools (`rustc --version`) |
+| `stale` | project | no | Days after which a verification is old (default 90) |
+| `files` | part | yes | Glob of the part's files |
+| `standard` | part | yes | The standard the part follows |
+| `verify` | part | yes | A check, run with `sh -c` in the project's root; every part needs one |
+| `recheck` | part | no | YYYY-MM-DD by which to read the standard and its errata again |
+| `reviewer` | project | yes | See signed reviews |
+| `self-reviewer` | project | yes | See signed reviews |
+| `sign` | project | no | See signed reviews |
+| `check-signature` | project | no | See signed reviews |
+
+Globs take `*`, `?` and `**` (any number of directories). Comments are
+whole lines starting with `#`; a `#` inside a value is part of it. A
+mistake in the ledger is reported with its line.
 
 ## Signed reviews
 
-A project without an independent audit can at least keep its reviews apart
-from its changes. Name the reviewers, their public keys, and the email
-addresses git records them by as authors, and the commands that sign and
-check:
+Reviews can be signed, and kept apart from the changes they review. Name
+the reviewers (a name, a public key file, and the email addresses git
+records them by as authors) and the commands that sign and check:
 
 ```text
 reviewer = alice keys/alice.pub alice@example.org
@@ -76,74 +164,55 @@ sign = basis-token sign "$STEWARD_REVIEWER" "$STEWARD_MESSAGE"
 check-signature = basis-token verify "$STEWARD_PUBLIC" "$STEWARD_MESSAGE" "$STEWARD_SIGNATURE"
 ```
 
-Then a review is made on a commit, as one of them:
+A review is then made on a commit, as one of them:
 
 ```bash
 steward review sha3 --as bob --note "read against FIPS 202 and its errata"
 ```
 
-It is refused while the part has changes not committed, and refused to a
-reviewer who is the author or a co-author (`Co-authored-by:`) of a commit
-that changed the part since its last signed review. The review's fields,
-the project and the commit are signed by `sign`, run with the terminal's
-input so that it can ask for a PIN; with Basis's `basis-token`, that is an
-ML-DSA-65 signature by a key kept on its token. `status` then fails a
-part whose last review is unsigned (`UNSIGNED`), by no listed reviewer or
-not carrying its reviewer's signature (`FORGED`), or by someone who wrote
-a change it covers (`SELF-REVIEW`), so that a record added or edited by
-hand is not taken on trust.
+- It is refused while the part has changes not committed.
+- It is refused to a reviewer who is the author or a co-author
+  (`Co-authored-by:`) of a commit that changed the part since its last
+  signed review kept apart from its changes.
+- The review's fields, the project and the commit are signed by `sign`,
+  which runs with the terminal's input so that it can ask for a PIN, and
+  prints the signature. `check-signature` exits 0 for a good one. Steward
+  passes them `STEWARD_REVIEWER`, `STEWARD_MESSAGE` (a file holding what to
+  sign), `STEWARD_PUBLIC` (the reviewer's public key file) and
+  `STEWARD_SIGNATURE`. With Basis's `basis-token`, the signature is
+  ML-DSA-65, by a key kept on its token under a PIN; any pair of commands
+  that sign and check can be used instead.
+- Every `status` checks each signature, and the separation again from git,
+  so a record added or edited by hand fails as `UNSIGNED`, `FORGED` or
+  `SELF-REVIEW`.
 
-The separation is as strong as the email addresses in the history: git
-records what its committers say. The signatures bind each review to its
-reviewer's key, the part's content and the commit.
-
-A project with one author and no second reviewer can still sign its
-reviews, without the separation: name that reviewer with `self-reviewer`
-instead of `reviewer`.
+A project with one author can sign its reviews without the separation by
+naming that person with `self-reviewer` instead of `reviewer`:
 
 ```text
 self-reviewer = carol keys/carol.pub carol@example.org
 ```
 
-Their reviews of changes they wrote then stand, and say so: `review` and
-`status` call each one a self-review, and `status` names every
-self-reviewer, so that the ledger and its output do not claim more than
-was done. Naming them `reviewer` again restores the rule: their
-self-reviews become `SELF-REVIEW` faults, and the changes those covered
-are left for the next review by someone else.
+Their reviews of their own changes then stand, and say so: `review` and
+`status` mark each one as a self-review, and `status` names every
+self-reviewer. Naming them `reviewer` again restores the rule.
 
 ## The records
 
-Beside the ledger, appended and never rewritten, tab-separated:
+Beside the ledger, appended and never rewritten, one line a record,
+tab-separated:
 
 - `steward.history`: every verification (date, part, content hash, pass or
   fail, seconds, toolchain fingerprint);
 - `steward.reviews`: every review (date, part, content hash, toolchain
-  fingerprint, and where reviews are signed the commit, the reviewer and
-  the signature, then the note).
+  fingerprint; where reviews are signed, the commit, the reviewer and the
+  signature; then the note).
 
-Commit them with the code: the project's upkeep is then part of its history.
-
-## Use
-
-```bash
-cargo build --release
-```
-
-```bash
-steward status                      # the default; exit 1 on any fault
-steward verify [PART...]            # run the checks and record them
-steward review PART [--as REVIEWER] --note "what was looked at"
-steward report [--strict]           # --strict: exit 1 if anything is due
-steward deps                        # the lock files alone
-steward toolchain                   # what the toolchain commands print
-steward hash PART
-```
-
-`--dir DIR` points at a project other than the current directory.
-
-A part's content hash is SHA-256 over its files in sorted order: each path,
-a NUL byte, the length as 8 bytes little-endian, the contents.
+Commit them with the code: the project's upkeep is then part of its
+history. A part's content hash is SHA-256 over its files in sorted order:
+each path, a NUL byte, the length as 8 bytes little-endian, the contents.
+The toolchain fingerprint is the first 16 hex digits of the SHA-256 of
+what the `toolchain` commands print.
 
 ## Testing
 
