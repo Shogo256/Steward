@@ -87,6 +87,7 @@ steward toolchain                   what the toolchain commands print, and its f
 steward hash PART                   a part's content hash
 ```
 
+`steward --help` lists them; `steward --version` gives the version.
 `--dir DIR` works on a project other than the current directory. Exit
 status: 0 when all is well, 1 on a fault, 2 on an error (a bad ledger, an
 unknown part, a refused review).

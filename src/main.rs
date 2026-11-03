@@ -49,7 +49,13 @@ struct Project {
 impl Project {
     fn open(dir: &Path) -> Result<Project, String> {
         let path = dir.join(LEDGER);
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => format!(
+                "no {LEDGER} in {}: write one at the project's root, or point --dir at a project (steward --help)",
+                dir.display()
+            ),
+            _ => format!("{}: {e}", path.display()),
+        })?;
         let ledger = ledger::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(Project { dir: dir.to_path_buf(), ledger })
     }
@@ -430,10 +436,59 @@ fn report(p: &Project, strict: bool) -> Result<bool, String> {
 
 // -------------------------------------------------------------------- main
 
-fn usage() -> ! {
-    eprintln!("steward [--dir DIR] [status | verify [PART...] | review PART [--as REVIEWER] --note TEXT | report [--strict] | deps | toolchain | hash PART]");
-    exit(2)
+const LOGO: &str = r" ____  _                             _
+/ ___|| |_ _____      ____ _ _ __ __| |
+\___ \| __/ _ \ \ /\ / / _` | '__/ _` |
+ ___) | ||  __/\ V  V / (_| | | | (_| |
+|____/ \__\___| \_/\_/ \__,_|_|  \__,_|";
+
+const USAGE: &str = "steward [--dir DIR] [status | verify [PART...] | review PART [--as REVIEWER] --note TEXT | report [--strict] | deps | toolchain | hash PART]";
+
+/// The logo, coloured on a terminal unless NO_COLOR is set.
+fn logo() -> String {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        format!("\x1b[36m{LOGO}\x1b[0m")
+    } else {
+        LOGO.to_string()
+    }
 }
+
+fn version() -> ! {
+    println!("{}\n\nsteward {}", logo(), env!("CARGO_PKG_VERSION"));
+    exit(0)
+}
+
+fn help() -> ! {
+    println!(
+        "{}
+
+steward {}: the upkeep of code a project writes itself
+
+usage: steward [--dir DIR] [COMMAND]
+
+commands:
+  status                      every part as reviewed? (the default; exit 1 on a fault)
+  verify [PART...]            run the parts' checks and record them
+  review PART [--as REVIEWER] --note TEXT
+                              record that a part was looked at
+  report [--strict]           what needs attention (--strict: exit 1 if anything does)
+  deps                        the lock files alone
+  toolchain                   what the toolchain commands print, and its fingerprint
+  hash PART                   a part's content hash
+
+options:
+  --dir DIR                   the project, if not the current directory
+  -h, --help                  this help
+  -V, --version               the version
+
+The project's ledger is steward.ledger, at its root.",
+        logo(),
+        env!("CARGO_PKG_VERSION")
+    );
+    exit(0)
+}
+
 
 fn run(args: &[String]) -> Result<bool, String> {
     let mut dir = PathBuf::from(".");
@@ -442,7 +497,8 @@ fn run(args: &[String]) -> Result<bool, String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--dir" => dir = PathBuf::from(it.next().ok_or("--dir needs a directory")?),
-            "-h" | "--help" => usage(),
+            "-h" | "--help" | "help" if rest.is_empty() => help(),
+            "-V" | "--version" | "version" if rest.is_empty() => version(),
             _ => rest.push(a.clone()),
         }
     }
@@ -476,7 +532,7 @@ fn run(args: &[String]) -> Result<bool, String> {
             println!("{}", p.hash(c)?);
             Ok(true)
         }
-        Some(other) => Err(format!("unknown command `{other}`")),
+        Some(other) => Err(format!("unknown command `{other}`\n{USAGE}\n(steward --help for more)")),
     }
 }
 

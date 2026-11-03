@@ -277,3 +277,21 @@ fn an_unsigned_review_does_not_stand_where_reviews_are_signed() {
     assert!(out.contains("UNSIGNED"), "{out}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn help_and_version_show_the_logo_anywhere() {
+    let nowhere = std::env::temp_dir();
+    for (args, says) in [(&["--help"][..], "usage: steward"), (&["--version"][..], "steward 0.1.0"), (&["-V"][..], "steward 0.1.0")] {
+        let out = Command::new(env!("CARGO_BIN_EXE_steward")).current_dir(&nowhere).args(args).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{args:?}");
+        assert!(text.contains(r"|____/ \__\___|"), "{args:?}: {text}");
+        assert!(text.contains(says), "{args:?}: {text}");
+        assert!(!text.contains('\x1b'), "no colour off a terminal: {text}");
+    }
+    let d = project("unknown");
+    let (code, out) = steward(&d, &["frobnicate"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("usage") || out.contains("steward [--dir DIR]"), "{out}");
+    let _ = std::fs::remove_dir_all(&d);
+}
