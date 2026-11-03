@@ -20,11 +20,7 @@ Requirements: Rust (to build), `sh` (to run the checks; on Windows, Git
 Bash or similar), and git for signed reviews.
 
 ```bash
-git clone <this repository's URL> steward
-```
-
-```bash
-cargo install --path steward
+cargo install --git https://github.com/Shogo256/Steward.git
 ```
 
 This puts `steward` on the `PATH` (in `~/.cargo/bin`).
